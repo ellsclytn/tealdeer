@@ -17,7 +17,7 @@ use yansi::{Color, Style};
 
 use crate::{
     extensions::Dedup as _,
-    types::{PathSource, PlatformType},
+    types::{CleanPath, PathSource, PlatformType},
 };
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -256,9 +256,9 @@ impl Default for RawUpdatesConfig {
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct RawDirectoriesConfig {
     #[serde(default)]
-    pub cache_dir: Option<PathBuf>,
+    pub cache_dir: Option<CleanPath>,
     #[serde(default)]
-    pub custom_pages_dir: Option<PathBuf>,
+    pub custom_pages_dir: Option<CleanPath>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -793,8 +793,8 @@ mod test {
     #[test]
     fn relative_path_resolution() {
         let mut raw_config = RawConfig::default();
-        raw_config.directories.cache_dir = Some("../cache".into());
-        raw_config.directories.custom_pages_dir = Some("../custom_pages".into());
+        raw_config.directories.cache_dir = Some("../cache".try_into().unwrap());
+        raw_config.directories.custom_pages_dir = Some("../custom_pages".try_into().unwrap());
 
         let config = Config::from_raw(
             &raw_config,
@@ -812,6 +812,33 @@ mod test {
         assert_eq!(
             config.directories.custom_pages_dir.unwrap().path(),
             Path::new("/path/to/config/../custom_pages")
+        );
+    }
+
+    #[test]
+    fn tilde_path_expansion() {
+        let mut raw_config = RawConfig::default();
+        raw_config.directories.cache_dir = Some("~/my/custom_cache".try_into().unwrap());
+        raw_config.directories.custom_pages_dir = Some("~/custom_pages".try_into().unwrap());
+
+        let config = Config::from_raw(
+            &raw_config,
+            PathWithSource {
+                path: PathBuf::from("/path/to/config/config.toml"),
+                source: PathSource::OsConvention,
+            },
+        )
+        .unwrap();
+
+        let home_dir = dirs::home_dir().unwrap();
+
+        assert_eq!(
+            config.directories.cache_dir.path(),
+            home_dir.join("my/custom_cache")
+        );
+        assert_eq!(
+            config.directories.custom_pages_dir.unwrap().path(),
+            home_dir.join("custom_pages")
         );
     }
 

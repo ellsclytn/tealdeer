@@ -1,7 +1,15 @@
 //! Shared types used in tealdeer.
 
-use std::{fmt, str};
+use std::{
+    fmt,
+    ops::Deref,
+    path::{Path, PathBuf},
+    str,
+};
 
+use serde::{
+    Deserialize as DeserializeTrait, Deserializer, Serialize as SerializeTrait, Serializer,
+};
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Serialize, Deserialize)]
@@ -217,6 +225,56 @@ impl fmt::Display for PathSource {
                 Self::Cli => "command line argument",
             }
         )
+    }
+}
+
+fn expand_tilde(s: &str) -> Option<PathBuf> {
+    if let Some(rest) = s.strip_prefix("~/") {
+        Some(dirs::home_dir()?.join(rest))
+    } else if s == "~" {
+        dirs::home_dir()
+    } else {
+        Some(PathBuf::from(s))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CleanPath(PathBuf);
+
+impl AsRef<Path> for CleanPath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_ref()
+    }
+}
+
+impl Deref for CleanPath {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl<'de> DeserializeTrait<'de> for CleanPath {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let path = expand_tilde(&s)
+            .ok_or_else(|| serde::de::Error::custom("could not determine home directory"))?;
+        Ok(CleanPath(clean_path::clean(path)))
+    }
+}
+
+impl TryFrom<&str> for CleanPath {
+    type Error = &'static str;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let path = expand_tilde(s).ok_or("could not determine home directory")?;
+        Ok(CleanPath(clean_path::clean(path)))
+    }
+}
+
+impl SerializeTrait for CleanPath {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
     }
 }
 
