@@ -711,8 +711,17 @@ impl ConfigLoader {
 pub fn get_config_dir() -> Result<(PathBuf, PathSource)> {
     // Allow overriding the config directory by setting the
     // $TEALDEER_CONFIG_DIR env variable.
-    if let Ok(value) = env::var("TEALDEER_CONFIG_DIR") {
-        return Ok((PathBuf::from(value), PathSource::EnvVar));
+    get_config_dir_inner(env::var("TEALDEER_CONFIG_DIR").ok())
+}
+
+fn get_config_dir_inner(env_override: Option<String>) -> Result<(PathBuf, PathSource)> {
+    if let Some(value) = env_override {
+        // Let this error bubble up: the user has supplied $TEALDEER_CONFIG_DIR, but we couldn't
+        // resolve it. We should exit early instead of loading config from a path that wasn't asked
+        // for.
+        let clean_path = CleanPath::try_from(value.as_ref()).map_err(anyhow::Error::msg)?;
+
+        return Ok((clean_path.to_path_buf(), PathSource::EnvVar));
     }
 
     // Otherwise, fall back to the user config directory.
@@ -788,6 +797,33 @@ mod test {
         let serialized = toml::to_string(&raw_config).unwrap();
         let deserialized: RawConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(raw_config, deserialized);
+    }
+
+    #[test]
+    fn config_dir_env() {
+        let absolute_override =
+            get_config_dir_inner(Some("/absolute/path/nested/../".to_string())).unwrap();
+
+        assert_eq!(
+            absolute_override,
+            (PathBuf::from("/absolute/path"), PathSource::EnvVar)
+        );
+
+        let home_dir = dirs::home_dir().unwrap();
+        let tilde_override =
+            get_config_dir_inner(Some("~/user/path/../nested".to_string())).unwrap();
+
+        assert_eq!(
+            tilde_override,
+            (home_dir.join("user/nested"), PathSource::EnvVar)
+        );
+    }
+
+    #[test]
+    fn config_dir_default() {
+        let config_dir = get_config_dir_inner(None).unwrap();
+
+        assert_eq!(config_dir.1, PathSource::OsConvention);
     }
 
     #[test]
