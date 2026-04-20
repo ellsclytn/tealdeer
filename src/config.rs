@@ -1,8 +1,10 @@
 use std::{
-    env, fmt,
+    borrow::Cow,
+    env::{self, home_dir},
+    fmt,
     fs::{self, File},
     io::{ErrorKind, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::LazyLock,
     time::Duration,
 };
@@ -17,7 +19,7 @@ use yansi::{Color, Style};
 
 use crate::{
     extensions::Dedup as _,
-    types::{CleanPath, PathSource, PlatformType},
+    types::{PathSource, PlatformType},
 };
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -256,9 +258,9 @@ impl Default for RawUpdatesConfig {
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct RawDirectoriesConfig {
     #[serde(default)]
-    pub cache_dir: Option<CleanPath>,
+    pub cache_dir: Option<PathBuf>,
     #[serde(default)]
-    pub custom_pages_dir: Option<CleanPath>,
+    pub custom_pages_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,11 +591,13 @@ impl<'a> Config<'a> {
                 source: PathSource::EnvVar,
             }
         } else if let Some(config_value) = &raw_config.directories.cache_dir {
-            // If the user explicitly configured a cache directory, use that.
+            // Resolve possible ~ prefixed path
+            let expanded_path = expand_path(config_value, env::home_dir())?.into_owned();
+            // Resolve possible relative path.
+            let resolved_path = relative_path_root.join(expanded_path);
+
             PathWithSource {
-                // Resolve possible relative path. It would be nicer to clean up the path, but Rust stdlib
-                // does not give any method for that that does not need the paths to exist.
-                path: relative_path_root.join(config_value),
+                path: resolved_path,
                 source: PathSource::ConfigFile,
             }
         } else if let Ok(default_dir) = get_app_root(AppDataType::UserCache, &crate::APP_INFO) {
@@ -610,11 +614,18 @@ impl<'a> Config<'a> {
             .directories
             .custom_pages_dir
             .as_ref()
-            .map(|path| PathWithSource {
+            .map(|path| -> Result<PathWithSource> {
+                // Resolve possible ~ prefixed path
+                let expanded_path = expand_path(path, env::home_dir())?.into_owned();
                 // Resolve possible relative path.
-                path: relative_path_root.join(path),
-                source: PathSource::ConfigFile,
+                let resolved_path = relative_path_root.join(expanded_path);
+
+                Ok(PathWithSource {
+                    path: resolved_path,
+                    source: PathSource::ConfigFile,
+                })
             })
+            .transpose()?
             .or_else(|| {
                 get_app_root(AppDataType::UserData, &crate::APP_INFO)
                     .map(|path| {
@@ -640,6 +651,38 @@ impl<'a> Config<'a> {
             file_path: config_file_path,
         })
     }
+}
+
+fn expand_path<'a>(
+    input_path: &'a PathBuf,
+    home_path: Option<PathBuf>,
+) -> Result<Cow<'a, PathBuf>> {
+    if input_path.is_absolute() {
+        return Ok(Cow::Borrowed(input_path));
+    }
+
+    let home_path = home_path.ok_or(anyhow!("Unable to find user home directory"))?;
+    let mut components = input_path.components();
+
+    if let Some(Component::Normal(first_component_raw)) = components.next() {
+        let first_component = first_component_raw
+            .to_str()
+            .ok_or(anyhow!("Path contains invalid UTF-8"))?;
+
+        if first_component.starts_with("~") {
+            match first_component.len() {
+                1 => {
+                    let rest: PathBuf = components.collect();
+                    let expanded = home_path.join(rest);
+
+                    return Ok(Cow::Owned(expanded));
+                }
+                _ => return Err(anyhow!("Tilde expansion with a login name not supported")),
+            }
+        }
+    }
+
+    Ok(Cow::Borrowed(input_path))
 }
 
 /// The [`ConfigLoader`] is used to load a [`Config`] from a file.
@@ -719,9 +762,11 @@ fn get_config_dir_inner(env_override: Option<String>) -> Result<(PathBuf, PathSo
         // Let this error bubble up: the user has supplied $TEALDEER_CONFIG_DIR, but we couldn't
         // resolve it. We should exit early instead of loading config from a path that wasn't asked
         // for.
-        let clean_path = CleanPath::try_from(value.as_ref()).map_err(anyhow::Error::msg)?;
+        // let clean_path = CleanPath::try_from(value.as_ref()).map_err(anyhow::Error::msg)?;
+        let path = PathBuf::from(value);
+        let clean_path = expand_path(&path, env::home_dir());
 
-        return Ok((clean_path.to_path_buf(), PathSource::EnvVar));
+        return Ok((clean_path?.into_owned(), PathSource::EnvVar));
     }
 
     // Otherwise, fall back to the user config directory.
@@ -800,22 +845,35 @@ mod test {
     }
 
     #[test]
+    fn path_expansion() {
+        let home = PathBuf::from("/foo/bar");
+        let dir_to_expand = PathBuf::from("~/baz");
+
+        let res = expand_path(&dir_to_expand, Some(home)).unwrap();
+
+        assert_eq!(*res, PathBuf::from("/foo/bar/baz"));
+    }
+
+    #[test]
     fn config_dir_env() {
         let absolute_override =
             get_config_dir_inner(Some("/absolute/path/nested/../".to_string())).unwrap();
 
         assert_eq!(
             absolute_override,
-            (PathBuf::from("/absolute/path"), PathSource::EnvVar)
+            (
+                PathBuf::from("/absolute/path/nested/../"),
+                PathSource::EnvVar
+            )
         );
 
-        let home_dir = dirs::home_dir().unwrap();
+        let home = env::home_dir().unwrap();
         let tilde_override =
             get_config_dir_inner(Some("~/user/path/../nested".to_string())).unwrap();
 
         assert_eq!(
             tilde_override,
-            (home_dir.join("user/nested"), PathSource::EnvVar)
+            (home.join("user/path/../nested"), PathSource::EnvVar)
         );
     }
 
@@ -866,7 +924,7 @@ mod test {
         )
         .unwrap();
 
-        let home_dir = dirs::home_dir().unwrap();
+        let home_dir = env::home_dir().unwrap();
 
         assert_eq!(
             config.directories.cache_dir.path(),
