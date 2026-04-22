@@ -752,7 +752,14 @@ pub fn get_config_dir() -> Result<(PathBuf, PathSource)> {
     // Allow overriding the config directory by setting the
     // $TEALDEER_CONFIG_DIR env variable.
     if let Ok(value) = env::var("TEALDEER_CONFIG_DIR") {
-        return Ok((PathBuf::from(value), PathSource::EnvVar));
+        let path = PathBuf::from(value);
+
+        // Let this error bubble up: the user has supplied $TEALDEER_CONFIG_DIR, but we couldn't
+        // resolve it. We should exit early instead of loading config from a path that wasn't asked
+        // for.
+        let expanded_path = expand_path(&path, env::home_dir().as_ref())?;
+
+        return Ok((expanded_path.into_owned(), PathSource::EnvVar));
     }
 
     // Otherwise, fall back to the user config directory.
