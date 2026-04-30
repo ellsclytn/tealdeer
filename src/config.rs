@@ -575,6 +575,7 @@ impl<'a> Config<'a> {
             .path()
             .parent()
             .context("Failed to get config directory")?;
+        let home_path = env::home_dir();
 
         // Determine directories config. For this, we need to take some
         // additional factory into account, like env variables, or the
@@ -591,7 +592,7 @@ impl<'a> Config<'a> {
             }
         } else if let Some(config_value) = &raw_config.directories.cache_dir {
             // Resolve possible ~ prefixed path
-            let expanded_path = expand_path(config_value, env::home_dir().as_ref())?.into_owned();
+            let expanded_path = expand_home(config_value, home_path.as_ref())?;
             // Resolve possible relative path.
             let resolved_path = relative_path_root.join(expanded_path);
 
@@ -615,7 +616,7 @@ impl<'a> Config<'a> {
             .as_ref()
             .map(|path| -> Result<PathWithSource> {
                 // Resolve possible ~ prefixed path
-                let expanded_path = expand_path(path, env::home_dir().as_ref())?.into_owned();
+                let expanded_path = expand_home(path, home_path.as_ref())?;
                 // Resolve possible relative path.
                 let resolved_path = relative_path_root.join(expanded_path);
 
@@ -653,12 +654,11 @@ impl<'a> Config<'a> {
 }
 
 /// Expands tilde (~) prefixed directories into its absolute version
-fn expand_path<'a>(input_path: &'a PathBuf, home_path: Option<&PathBuf>) -> Result<Cow<'a, Path>> {
+fn expand_home<'a>(input_path: &'a Path, home_path: Option<&PathBuf>) -> Result<Cow<'a, Path>> {
     if input_path.is_absolute() {
         return Ok(Cow::Borrowed(input_path));
     }
 
-    let home_path = home_path.ok_or(anyhow!("Unable to find user home directory"))?;
     let mut components = input_path.components();
 
     if let Some(Component::Normal(first_component_raw)) = components.next() {
@@ -666,16 +666,14 @@ fn expand_path<'a>(input_path: &'a PathBuf, home_path: Option<&PathBuf>) -> Resu
             .to_str()
             .ok_or(anyhow!("Path contains invalid UTF-8"))?;
 
-        if first_component.starts_with("~") {
-            match first_component.len() {
-                1 => {
-                    let rest: PathBuf = components.collect();
-                    let expanded = home_path.join(rest);
+        if first_component == "~" {
+            let home_path = home_path.ok_or(anyhow!("Unable to find user home directory"))?;
+            let rest: PathBuf = components.collect();
+            let expanded = home_path.join(rest);
 
-                    return Ok(Cow::Owned(expanded));
-                }
-                _ => return Err(anyhow!("Tilde expansion with a login name not supported")),
-            }
+            return Ok(Cow::Owned(expanded));
+        } else if first_component.starts_with('~') {
+            return Err(anyhow!("Tilde expansion with a login name not supported"));
         }
     }
 
@@ -752,12 +750,12 @@ pub fn get_config_dir() -> Result<(PathBuf, PathSource)> {
     // Allow overriding the config directory by setting the
     // $TEALDEER_CONFIG_DIR env variable.
     if let Ok(value) = env::var("TEALDEER_CONFIG_DIR") {
-        let path = PathBuf::from(value);
+        let path = Path::new(&value);
 
         // Let this error bubble up: the user has supplied $TEALDEER_CONFIG_DIR, but we couldn't
         // resolve it. We should exit early instead of loading config from a path that wasn't asked
         // for.
-        let expanded_path = expand_path(&path, env::home_dir().as_ref())?;
+        let expanded_path = expand_home(path, env::home_dir().as_ref())?;
 
         return Ok((expanded_path.into_owned(), PathSource::EnvVar));
     }
@@ -843,7 +841,7 @@ mod test {
         let path_to_expand = PathBuf::from("~/baz");
 
         assert_eq!(
-            *expand_path(&path_to_expand, home.as_ref()).unwrap(),
+            *expand_home(&path_to_expand, home.as_ref()).unwrap(),
             PathBuf::from("/foo/bar/baz")
         );
     }
@@ -854,7 +852,7 @@ mod test {
         let dir_to_expand = PathBuf::from("/one/two");
 
         assert_eq!(
-            *expand_path(&dir_to_expand, home.as_ref()).unwrap(),
+            *expand_home(&dir_to_expand, home.as_ref()).unwrap(),
             dir_to_expand
         );
     }
@@ -864,7 +862,7 @@ mod test {
         let home = Some(PathBuf::from("/foo/bar"));
         let dir_to_expand = PathBuf::from("~baz/foo");
 
-        assert!(expand_path(&dir_to_expand, home.as_ref()).is_err());
+        assert!(expand_home(&dir_to_expand, home.as_ref()).is_err());
     }
 
     #[test]
